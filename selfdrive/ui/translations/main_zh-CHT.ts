@@ -151,6 +151,14 @@
         <source>MADS: Pause Lateral on Brake</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Enable sunnylink</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Enables or disables sunnylink.</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>DevicePanel</name>
