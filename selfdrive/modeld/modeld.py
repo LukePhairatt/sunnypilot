@@ -62,11 +62,12 @@ class ModelState:
     self.full_features_20Hz = np.zeros((ModelConstants.FULL_HISTORY_BUFFER_LEN, ModelConstants.FEATURE_LEN), dtype=np.float32)
     self.desire_20Hz =  np.zeros((ModelConstants.FULL_HISTORY_BUFFER_LEN + 1, ModelConstants.DESIRE_LEN), dtype=np.float32)
 
-    # img buffers are managed in openCL transform code
     self.numpy_inputs = {
       'desire': np.zeros((1, (ModelConstants.HISTORY_BUFFER_LEN+1), ModelConstants.DESIRE_LEN), dtype=np.float32),
       'traffic_convention': np.zeros((1, ModelConstants.TRAFFIC_CONVENTION_LEN), dtype=np.float32),
-      'features_buffer': np.zeros((1, ModelConstants.HISTORY_BUFFER_LEN,  ModelConstants.FEATURE_LEN), dtype=np.float32),
+      'lateral_control_params': np.zeros(ModelConstants.LATERAL_CONTROL_PARAMS_LEN, dtype=np.float32),
+      'prev_desired_curv': np.zeros(ModelConstants.PREV_DESIRED_CURV_LEN * (ModelConstants.HISTORY_BUFFER_LEN+1), dtype=np.float32),
+      'features_buffer': np.zeros(ModelConstants.HISTORY_BUFFER_LEN * ModelConstants.FEATURE_LEN, dtype=np.float32),
     }
 
     with open(METADATA_PATH, 'rb') as f:
@@ -92,20 +93,22 @@ class ModelState:
     return parsed_model_outputs
 
   def run(self, buf: VisionBuf, wbuf: VisionBuf, transform: np.ndarray, transform_wide: np.ndarray,
-                inputs: dict[str, np.ndarray], prepare_only: bool) -> dict[str, np.ndarray] | None:
+          inputs: dict[str, np.ndarray], prepare_only: bool) -> dict[str, np.ndarray] | None:
     # Model decides when action is completed, so desire input is just a pulse triggered on rising edge
     inputs['desire'][0] = 0
     new_desire = np.where(inputs['desire'] - self.prev_desire > .99, inputs['desire'], 0)
+    self.numpy_inputs['desire'][:-ModelConstants.DESIRE_LEN] = self.numpy_inputs['desire'][ModelConstants.DESIRE_LEN:]
+    self.numpy_inputs['desire'][-ModelConstants.DESIRE_LEN:] = np.where(inputs['desire'] - self.prev_desire > .99, inputs['desire'], 0)
     self.prev_desire[:] = inputs['desire']
-
     self.desire_20Hz[:-1] = self.desire_20Hz[1:]
     self.desire_20Hz[-1] = new_desire
-    self.numpy_inputs['desire'][:] = self.desire_20Hz.reshape((1,25,4,-1)).max(axis=2)
-
+    self.numpy_inputs['traffic_convention'][:] = inputs['traffic_convention']
+    self.numpy_inputs['lateral_control_params'][:] = inputs['lateral_control_params']
+  
     self.numpy_inputs['traffic_convention'][:] = inputs['traffic_convention']
     imgs_cl = {'input_imgs': self.frames['input_imgs'].prepare(buf, transform.flatten()),
                'big_input_imgs': self.frames['big_input_imgs'].prepare(wbuf, transform_wide.flatten())}
-
+  
     if TICI:
       # The imgs tensors are backed by opencl memory, only need init once
       for key in imgs_cl:
@@ -114,22 +117,16 @@ class ModelState:
     else:
       for key in imgs_cl:
         self.numpy_inputs[key] = self.frames[key].buffer_from_cl(imgs_cl[key]).reshape(self.input_shapes[key])
-
+  
     if prepare_only:
       return None
-
-    if TICI:
-      self.output = self.model_run(**self.tensor_inputs).numpy().flatten()
-    else:
-      self.output = self.onnx_cpu_runner.run(None, self.numpy_inputs)[0].flatten()
-
+  
     outputs = self.parser.parse_outputs(self.slice_outputs(self.output))
-
-    self.full_features_20Hz[:-1] = self.full_features_20Hz[1:]
-    self.full_features_20Hz[-1] = outputs['hidden_state'][0, :]
-
-    idxs = np.arange(-4,-100,-4)[::-1]
-    self.numpy_inputs['features_buffer'][:] = self.full_features_20Hz[idxs]
+  
+    self.numpy_inputs['features_buffer'][:-ModelConstants.FEATURE_LEN] = self.numpy_inputs['features_buffer'][ModelConstants.FEATURE_LEN:]
+    self.numpy_inputs['features_buffer'][-ModelConstants.FEATURE_LEN:] = outputs['hidden_state'][0, :]
+    self.numpy_inputs['prev_desired_curv'][:-ModelConstants.PREV_DESIRED_CURV_LEN] = self.numpy_inputs['prev_desired_curv'][ModelConstants.PREV_DESIRED_CURV_LEN:]
+    self.numpy_inputs['prev_desired_curv'][-ModelConstants.PREV_DESIRED_CURV_LEN:] = outputs['desired_curvature'][0, :ModelConstants.PREV_DESIRED_CURV_LEN]
     return outputs
 
 
@@ -194,7 +191,8 @@ def main(demo=False):
   if demo:
     CP = get_demo_car_params()
   else:
-    CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
+    with car.CarParams.from_bytes(params.get("CarParams", block=True)) as msg:
+      CP = msg
   cloudlog.info("modeld got CarParams: %s", CP.carName)
 
   # TODO this needs more thought, use .2s extra for now to estimate other delays
@@ -227,8 +225,9 @@ def main(demo=False):
         continue
 
       if abs(meta_main.timestamp_sof - meta_extra.timestamp_sof) > 10000000:
-        cloudlog.error(f"frames out of sync! main: {meta_main.frame_id} ({meta_main.timestamp_sof / 1e9:.5f}),\
-                         extra: {meta_extra.frame_id} ({meta_extra.timestamp_sof / 1e9:.5f})")
+        cloudlog.error("frames out of sync! main: {} ({:.5f}), extra: {} ({:.5f})".format(
+          meta_main.frame_id, meta_main.timestamp_sof / 1e9,
+          meta_extra.frame_id, meta_extra.timestamp_sof / 1e9))
 
     else:
       # Use single camera
@@ -240,6 +239,7 @@ def main(demo=False):
     is_rhd = sm["driverMonitoringState"].isRHD
     frame_id = sm["roadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
+    lateral_control_params = np.array([sm["carState"].vEgo, steer_delay], dtype=np.float32)
     if sm.updated["liveCalibration"] and sm.seen['roadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["liveCalibration"].rpyCalib, dtype=np.float32)
       dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['roadCameraState'].sensor))]
@@ -270,7 +270,8 @@ def main(demo=False):
     inputs:dict[str, np.ndarray] = {
       'desire': vec_desire,
       'traffic_convention': traffic_convention,
-      }
+      'lateral_control_params': lateral_control_params,
+    }
 
     mt1 = time.perf_counter()
     model_output = model.run(buf_main, buf_extra, model_transform_main, model_transform_extra, inputs, prepare_only)
@@ -299,6 +300,7 @@ def main(demo=False):
       pm.send('modelV2', modelv2_send)
       pm.send('drivingModelData', drivingdata_send)
       pm.send('cameraOdometry', posenet_send)
+
     last_vipc_frame_id = meta_main.frame_id
 
 
