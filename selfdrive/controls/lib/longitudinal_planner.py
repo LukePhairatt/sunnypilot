@@ -140,7 +140,12 @@ class LongitudinalPlanner:
 
 
     v_ego = sm['carState'].vEgo
-    v_cruise_kph = min(sm['controlsState'].vCruise, V_CRUISE_MAX)
+    # MY ADD-ON: Low speed demo - Get GUI param to set low 20 kph cruise speed
+    low_speed_enabled = self.params.get_bool("EnableLowSpeedMode")
+    if low_speed_enabled:
+      v_cruise_kph = 20.0
+    else:
+      v_cruise_kph = min(sm['controlsState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
 
     long_control_off = sm['controlsState'].longControlState == LongCtrlState.off

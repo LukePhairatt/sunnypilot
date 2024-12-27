@@ -45,6 +45,12 @@ TogglesPanel::TogglesPanel(SettingsWindow *parent) : ListWidget(parent) {
       "../assets/img_experimental_white.svg",
     },
     {
+      "EnableLowSpeedMode",
+      tr("Enable Low Speed Mode"),
+      "",
+      "../assets/img_experimental_white.svg",
+    },
+    {
       "DisengageOnAccelerator",
       tr("Disengage on Accelerator Pedal"),
       tr("When enabled, pressing the accelerator pedal will disengage openpilot."),
