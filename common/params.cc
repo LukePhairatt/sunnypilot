@@ -364,6 +364,7 @@ std::unordered_map<std::string, uint32_t> keys = {
     {"OsmStateName", PERSISTENT},
     {"OSMDownloadProgress", CLEAR_ON_MANAGER_START},
     {"OsmDbUpdatesCheck", CLEAR_ON_MANAGER_START},  // mapd database update happens with device ON, reset on boot
+    {"EnableLowSpeedMode", PERSISTENT | BACKUP},
     // }} PFEIFER - MAPD
 };
 
